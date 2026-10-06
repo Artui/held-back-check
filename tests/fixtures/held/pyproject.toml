@@ -1,0 +1,21 @@
+# A project with a hold the action must report, and a ceiling it must honour.
+#
+# Every djangorestframework release from 3.16 requires a Django this project's
+# ceiling excludes, so the resolve backs off to the newest one that does not,
+# and says nothing. That is the shape of the case the check was written for,
+# built from two packages whose newest releases will keep that shape: a future
+# djangorestframework will not support Django 3.
+#
+# django itself is installed below its newest release too, and must not be
+# reported: ``<4`` is declared here, which is how a hold is accepted on purpose.
+[project]
+name = "held-fixture"
+version = "0"
+requires-python = ">=3.14"
+dependencies = ["djangorestframework", "django<4"]
+
+[dependency-groups]
+dev = ["packaging"]
+
+[tool.uv]
+package = false

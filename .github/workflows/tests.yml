@@ -1,0 +1,173 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Actions are pinned to a commit SHA rather than a tag: a tag is mutable, and an
+# action owner (or anyone who takes over the account) can silently repoint one at
+# new code that then runs with this workflow's token. The trailing version comment
+# is not decoration -- Dependabot reads it to know which release the SHA is, and
+# rewrites both together when a newer one ships.
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-groups
+      - name: ruff check
+        run: uv run ruff check .
+      - name: ruff format check
+        run: uv run ruff format --check --diff .
+      - name: ty
+        run: uv run ty check check_held_back.py
+
+  test:
+    name: ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The script runs on whatever Python a consumer's environment has, so
+        # every one the family supports, not only the newest a drift job uses.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-groups --python ${{ matrix.python-version }}
+      - name: Test, with the 100% line and branch gate
+        run: uv run pytest
+
+  # The unit tests replace the index and the resolver. This runs the action as
+  # a consumer does -- ``uses:``, a synced project, the real index, the real
+  # uv -- because a composite action is mostly wiring, and wiring is what a
+  # unit test cannot see.
+  action:
+    name: action, end to end
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.14"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      - name: Sync the fixtures
+        run: |
+          for fixture in held current bare; do
+            (cd "tests/fixtures/$fixture" && uv sync)
+          done
+
+      - name: Run against a project with a hold
+        id: held
+        uses: ./
+        continue-on-error: true
+        with:
+          working-directory: tests/fixtures/held
+      - name: It failed, named the hold, said what holds it, and honoured the ceiling
+        env:
+          OUTCOME: ${{ steps.held.outcome }}
+          REPORT: ${{ steps.held.outputs.report }}
+        run: |
+          set -x
+          test "$OUTCOME" = failure
+          # The output is set on failure, which is the only time a consumer reads it.
+          test "$REPORT" = "$RUNNER_TEMP/held-back.md"
+          grep -F '| `djangorestframework` |' "$REPORT"
+          # uv's derivation, naming the requirement that excludes the release.
+          # Only the requirement is matched: uv wraps the sentence around it.
+          grep -F 'django<4' "$REPORT"
+          ! grep -F '| `django` |' "$REPORT"
+
+      - name: Run against a project with nothing held back
+        id: current
+        uses: ./
+        with:
+          working-directory: tests/fixtures/current
+          report: current.md
+      - name: It passed, and wrote the report where it was told
+        env:
+          REPORT: ${{ steps.current.outputs.report }}
+        run: |
+          set -x
+          # Relative to the workspace, not to the working directory.
+          test "$REPORT" = "$GITHUB_WORKSPACE/current.md"
+          grep -F 'Every direct dependency resolved to its newest allowed release.' "$REPORT"
+
+      - name: Run where the check cannot look
+        id: bare
+        uses: ./
+        continue-on-error: true
+        with:
+          working-directory: tests/fixtures/bare
+          # The path the held run wrote: a report surviving from that run would
+          # be read as this one's.
+          report: ${{ steps.held.outputs.report }}
+      - name: It failed, and left no report to be mistaken for a result
+        env:
+          OUTCOME: ${{ steps.bare.outcome }}
+          REPORT: ${{ steps.bare.outputs.report }}
+        run: |
+          set -x
+          test "$OUTCOME" = failure
+          test -n "$REPORT"
+          test ! -e "$REPORT"
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+      - name: Scan repo + history
+        run: gitleaks git --redact --no-banner .
+
+  tests-passed:
+    name: tests
+    # always(), never !cancelled(): a skipped job reports a skipped check, and
+    # branch protection counts a skipped required check as passing.
+    if: always()
+    needs: [lint, test, action, secrets]
+    runs-on: ubuntu-latest
+    steps:
+      # Pass on an exact `success` from every job above, rather than failing on
+      # a list of bad results: such a list passes whatever it does not name, and
+      # GitHub reports a result it does not document. A job no hosted runner
+      # ever picks up reaches `needs` as `abandoned`, and a gate that failed
+      # only on `failure` and `cancelled` went green over exactly that while the
+      # jobs it guards never ran. A matrix reaches `needs` as one result.
+      #
+      # None of the jobs above has an `if:`, so `skipped` can only mean one of
+      # them never ran, and it fails like any other result.
+      - name: Verify every required job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          not_ok="$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"] | join(" ")')"
+          if [ -n "$not_ok" ]; then
+            echo "::error::required jobs did not succeed: $not_ok"
+            exit 1
+          fi

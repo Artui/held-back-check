@@ -1,0 +1,92 @@
+name: release
+
+# Main-triggered: every merge to `main` checks whether the version in
+# pyproject.toml has a tag yet, and releases it if not. A merge that does not
+# bump the version is a no-op. The release *is* the tag: consumers pin its
+# commit SHA, and there is nothing to upload.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# Actions are pinned to a commit SHA rather than a tag: a tag is mutable, and an
+# action owner (or anyone who takes over the account) can silently repoint one at
+# new code that then runs with this workflow's token. The trailing version comment
+# is not decoration -- Dependabot reads it to know which release the SHA is, and
+# rewrites both together when a newer one ships.
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create, which also creates the tag
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      # Gated on the tag on origin, which is the release itself, so a re-run
+      # after a failure later in this job picks up where it stopped.
+      - name: Is this version released?
+        id: version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)"
+          if [ -z "$version" ]; then
+            echo "::error::no version line in pyproject.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released, nothing to do"
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test before tagging
+        if: steps.version.outputs.released == 'true'
+        run: |
+          uv sync --all-groups
+          uv run pytest
+
+      - name: Release notes from the changelog
+        if: steps.version.outputs.released == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # The block between `## [<version>]` and the next `## [` heading,
+          # with surrounding blank lines trimmed.
+          awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (capture) { exit }
+              if (index($0, "[" ver "]") == 4) { capture = 1; next }
+            }
+            capture { print }
+          ' CHANGELOG.md \
+            | awk 'NF { found = 1 } found { lines[++n] = $0 }
+                   END { last = n; while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--;
+                         for (i = 1; i <= last; i++) print lines[i] }' \
+            > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+            echo "::error::CHANGELOG.md has no [$VERSION] section"
+            exit 1
+          fi
+
+      - name: Tag and create the GitHub Release
+        if: steps.version.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+          echo "Pin this release as: Artui/held-back-check@$GITHUB_SHA # v$VERSION" >> "$GITHUB_STEP_SUMMARY"

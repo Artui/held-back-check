@@ -1,0 +1,10 @@
+# A synced environment without ``packaging``, where the check cannot run. It
+# must fail and say why, rather than pass because it could not look.
+[project]
+name = "bare-fixture"
+version = "0"
+requires-python = ">=3.14"
+dependencies = ["six"]
+
+[tool.uv]
+package = false

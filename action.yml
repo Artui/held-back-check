@@ -1,0 +1,72 @@
+name: held-back-check
+description: >-
+  Fail when an unpinned uv resolve holds a direct dependency below its newest
+  release, and name the requirement that holds it.
+author: Artui
+
+# Run it after the step that syncs the environment a drift job tests, and
+# before the suite. It measures that environment rather than building its own:
+# what was installed, by the interpreter that installed it, under whatever
+# extras and groups the job chose. So it needs uv on PATH, a synced project
+# environment that has ``packaging`` (pytest brings it), and the network.
+inputs:
+  working-directory:
+    description: The directory holding pyproject.toml and the synced environment.
+    default: "."
+  min-age-days:
+    description: >-
+      A newer release younger than this is reported as a notice and never fails
+      the step. The default matches a Dependabot cooldown of seven days, and
+      absorbs the minutes in which the index this reads and the one the
+      resolver read can disagree.
+    default: "7"
+  report:
+    description: >-
+      Where to write the markdown report, relative to the workspace. Defaults to
+      held-back.md under the runner's temporary directory.
+    default: ""
+
+outputs:
+  report:
+    description: >-
+      Absolute path of the markdown report. Set even when the step fails, which
+      is when it matters; the file exists only if the check got as far as
+      comparing versions.
+    value: ${{ steps.paths.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    # A step of its own, so the output is set before the check can fail.
+    - id: paths
+      shell: bash
+      env:
+        REPORT: ${{ inputs.report }}
+      run: |
+        report="${REPORT:-$RUNNER_TEMP/held-back.md}"
+        case "$report" in
+          /*) ;;
+          *) report="$GITHUB_WORKSPACE/$report" ;;
+        esac
+        # A report left by an earlier invocation in the same job would be read
+        # as this one's if the check below died before writing its own.
+        rm -f "$report"
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      # Inputs reach the script through the environment, never spliced into
+      # it, so no value can become shell.
+      env:
+        MIN_AGE_DAYS: ${{ inputs.min-age-days }}
+        REPORT: ${{ steps.paths.outputs.report }}
+      run: |
+        if ! command -v uv >/dev/null 2>&1; then
+          echo "::error title=held-back-check cannot run::uv is not on PATH. Run astral-sh/setup-uv before this action."
+          exit 2
+        fi
+        # --no-sync is the point: a sync here would re-resolve the environment
+        # under uv's defaults and measure that instead of what the job installed.
+        uv run --no-sync python "$GITHUB_ACTION_PATH/check_held_back.py" \
+          --min-age-days "$MIN_AGE_DAYS" \
+          --report "$REPORT"
