@@ -57,6 +57,10 @@ repositories. They pin the action to a release's commit SHA, with a
   - a hold, plus a ceiling the check must honour;
   - a project that is current;
   - an environment without `packaging`, where the check must fail, not pass.
+- Each matrix arm also runs the suite on packaging 22, the oldest pytest
+  allows, because the script imports the consumer's packaging and its
+  behaviour changed under the script. Locally:
+  `uv run --with 'packaging==22.0' pytest`.
 - `tests/helpers.py` loads the script fresh for each test. Import it from there,
   never from `conftest.py`.
 

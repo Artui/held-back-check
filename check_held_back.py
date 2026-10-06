@@ -16,7 +16,8 @@ from another distribution's extra, which is exactly the kind of ceiling a drift
 job exists to measure, and the kind it could not see.
 
 For every **direct** requirement -- ``[project]`` dependencies, every extra and
-every dependency group, because a drift job installs all of them -- this
+every dependency group (uv's ``dev-dependencies`` among them), because a drift
+job installs all of them -- this
 compares the version installed in the synced environment with the newest
 release that:
 
@@ -63,6 +64,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import http.client
 import importlib.metadata
 import json
 import os
@@ -71,7 +73,6 @@ import platform
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -163,6 +164,10 @@ def declared_requirements(pyproject: dict[str, Any]) -> Iterator[str]:
         # An ``{include-group = ...}`` entry is skipped rather than followed:
         # every group is walked here anyway, the included one with the rest.
         yield from (entry for entry in group if isinstance(entry, str))
+    # uv's older spelling of the ``dev`` group, which it still installs as one.
+    # Skipping it would leave every requirement there unchecked and the step
+    # green, which is the failure this exists to prevent.
+    yield from pyproject.get("tool", {}).get("uv", {}).get("dev-dependencies", [])
 
 
 def declared_bounds(pyproject: dict[str, Any]) -> dict[NormalizedName, SpecifierSet]:
@@ -179,10 +184,12 @@ def declared_bounds(pyproject: dict[str, Any]) -> dict[NormalizedName, Specifier
     ceiling to consumers. Neither adds a name: a constraint on a transitive
     dependency is not a direct requirement.
     """
-    own = canonicalize_name(pyproject.get("project", {}).get("name", ""))
+    project = pyproject.get("project", {})
+    own = canonicalize_name(project.get("name", ""))
+    extras = ("", *project.get("optional-dependencies", {}))
     bounds: dict[NormalizedName, SpecifierSet] = {}
     for line in declared_requirements(pyproject):
-        requirement = _applicable(line)
+        requirement = _applicable(line, extras)
         if requirement is None:
             continue
         name = canonicalize_name(requirement.name)
@@ -193,28 +200,36 @@ def declared_bounds(pyproject: dict[str, Any]) -> dict[NormalizedName, Specifier
         bounds[name] = bounds.get(name, SpecifierSet()) & requirement.specifier
     uv = pyproject.get("tool", {}).get("uv", {})
     overrides: dict[NormalizedName, SpecifierSet] = {}
+    # Overrides first and constraints after, as uv applies them: an override
+    # replaces the requirement, and a constraint still binds what replaced it.
+    # Several override lines for one name are all applied, so they intersect.
     for line in uv.get("override-dependencies", []):
-        requirement = _applicable(line)
+        requirement = _applicable(line, extras)
         if requirement is not None and canonicalize_name(requirement.name) in bounds:
             name = canonicalize_name(requirement.name)
             overrides[name] = overrides.get(name, SpecifierSet()) & requirement.specifier
     bounds.update(overrides)
     for line in uv.get("constraint-dependencies", []):
-        requirement = _applicable(line)
+        requirement = _applicable(line, extras)
         if requirement is not None and canonicalize_name(requirement.name) in bounds:
             bounds[canonicalize_name(requirement.name)] &= requirement.specifier
     return bounds
 
 
-def _applicable(line: str) -> Requirement | None:
+def _applicable(line: str, extras: Iterable[str]) -> Requirement | None:
+    """The requirement, or ``None`` when its marker excludes this install.
+
+    A marker can name an extra (``; extra == 'postgres'``) as well as a table
+    can, and ``--all-extras`` installs it, so it applies when it holds with no
+    extra or with any extra the project declares. ``extra`` is always supplied,
+    since older ``packaging`` raises on a marker that names it otherwise.
+    """
     try:
         requirement = Requirement(line)
     except InvalidRequirement as error:
         raise CannotCheck(f"cannot parse requirement {line!r}: {error}") from error
-    # ``extra`` is supplied because older ``packaging`` raises on a marker that
-    # names it when the environment has none. pyproject declares extras as
-    # tables rather than markers, so an empty one matches nothing it should.
-    if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""}):
+    marker = requirement.marker
+    if marker is not None and not any(marker.evaluate({"extra": extra}) for extra in extras):
         return None
     return requirement
 
@@ -313,8 +328,15 @@ def fetch_files(name: NormalizedName) -> list[dict[str, Any]]:
     while True:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)["files"]
-        except (urllib.error.URLError, TimeoutError) as error:
+                page = json.load(response)
+            if not isinstance(page, dict) or not isinstance(page.get("files"), list):
+                raise ValueError("the response is not a simple API project page")
+            return page["files"]
+        # urllib wraps a failure to send the request in ``URLError``, but not
+        # one while reading the answer: a connection dropped mid-response is an
+        # ``OSError`` or an ``http.client.HTTPException``, and a proxy's HTML
+        # page served as a 200 is a ``ValueError``. Each is a failure to look.
+        except (OSError, http.client.HTTPException, ValueError) as error:
             # The resolve this runs after has just read the same index, so a
             # failure here is transient. It is retried and then fatal: a check
             # that passes when it could not look is the failure it exists for.
@@ -523,6 +545,9 @@ def _check(args: argparse.Namespace) -> int:
     text = report(findings, reasons, python, args.min_age_days, now)
     print(text)
     if args.report is not None:
+        # A directory that does not exist yet is created rather than failing
+        # the step after the report was already printed.
+        args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(text + "\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

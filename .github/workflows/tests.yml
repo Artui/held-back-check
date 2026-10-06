@@ -53,6 +53,12 @@ jobs:
         run: uv sync --all-groups --python ${{ matrix.python-version }}
       - name: Test, with the 100% line and branch gate
         run: uv run pytest
+      # The script imports whatever packaging the consumer has, and pytest
+      # allows any from 22. They differ where it matters: up to 25, a plain
+      # specifier excludes a pre-release unless asked, so a guard the locked
+      # packaging makes redundant is load-bearing there.
+      - name: Test against the oldest packaging pytest allows
+        run: uv run --with 'packaging==22.0' pytest
 
   # The unit tests replace the index and the resolver. This runs the action as
   # a consumer does -- ``uses:``, a synced project, the real index, the real
@@ -94,7 +100,30 @@ jobs:
           # uv's derivation, naming the requirement that excludes the release.
           # Only the requirement is matched: uv wraps the sentence around it.
           grep -F 'django<4' "$REPORT"
-          ! grep -F '| `django` |' "$REPORT"
+          # Not ``! grep``: a negated command never trips ``set -e``, so that
+          # form checks nothing once another line follows it.
+          if grep -F '| `django` |' "$REPORT"; then
+            echo "::error::the declared ceiling on django was reported as a hold"
+            exit 1
+          fi
+
+      # The same hold, with a window older than every release: the newer one is
+      # now a notice and the step passes. Nothing else exercises the input,
+      # whose default equals the script's own.
+      - name: Run against the same hold with a window wider than every release
+        id: wide
+        uses: ./
+        with:
+          working-directory: tests/fixtures/held
+          min-age-days: "36500"
+          report: wide.md
+      - name: It passed, and reported the newer release as a notice
+        env:
+          REPORT: ${{ steps.wide.outputs.report }}
+        run: |
+          set -x
+          grep -F '### Newer, but inside the 36500-day window' "$REPORT"
+          grep -F -- '- `djangorestframework` ' "$REPORT"
 
       - name: Run against a project with nothing held back
         id: current

@@ -45,6 +45,20 @@ def test_every_input_reaches_the_steps() -> None:
         assert f"inputs.{name} }}}}" in wired, name
 
 
+def test_each_value_reaches_the_script_as_its_flag() -> None:
+    # Reaching ``env`` is half of it. Without the flag the script runs on its
+    # own default, which for ``min-age-days`` equals the action's, so every
+    # run that leaves the input alone would pass with the input ignored.
+    step = _check_step()
+
+    assert step["env"] == {
+        "MIN_AGE_DAYS": "${{ inputs.min-age-days }}",
+        "REPORT": step["env"]["REPORT"],
+    }
+    assert '--min-age-days "$MIN_AGE_DAYS"' in step["run"]
+    assert '--report "$REPORT"' in step["run"]
+
+
 def test_the_check_measures_what_the_consumer_installed() -> None:
     # A sync would re-resolve under uv's defaults -- no extras, the default
     # groups -- and the check would measure that instead of the job's install.
@@ -72,7 +86,11 @@ def test_a_stale_report_is_removed_before_the_check_runs() -> None:
     assert 'rm -f "$report"' in paths["run"]
 
 
-_PIN = re.compile(r"uses: (?P<action>[\w.-]+/[\w./-]+)@(?P<ref>\S+)(?P<comment>.*)")
+# A ``uses:`` key, not the text: ``release.yml`` prints a pin line for the
+# release notes, whose SHA is a shell variable.
+_PIN = re.compile(
+    r"^\s*(?:- )?uses: (?P<action>[\w.-]+/[\w./-]+)@(?P<ref>\S+)(?P<comment>.*)", re.MULTILINE
+)
 
 
 @pytest.mark.parametrize(

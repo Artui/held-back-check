@@ -1,6 +1,6 @@
 # A project with a hold the action must report, and a ceiling it must honour.
 #
-# Every djangorestframework release from 3.16 requires a Django this project's
+# Every djangorestframework release from 3.15.2 requires a Django this project's
 # ceiling excludes, so the resolve backs off to the newest one that does not,
 # and says nothing. That is the shape of the case the check was written for,
 # built from two packages whose newest releases will keep that shape: a future

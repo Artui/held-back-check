@@ -23,7 +23,9 @@ inputs:
   report:
     description: >-
       Where to write the markdown report, relative to the workspace. Defaults to
-      held-back.md under the runner's temporary directory.
+      held-back.md under the runner's temporary directory, so a job that runs
+      the action more than once sets it on each use: every run first removes
+      the report at its path.
     default: ""
 
 outputs:

@@ -35,10 +35,13 @@ type-check:
 	uv run ty check check_held_back.py
 
 # The release itself is release.yml, on the merge to main that carries the bump.
+# The lock records the project's own version, so it is relocked with it, by the
+# uv that writes the revision the lock already has.
 release-bump:
 	@if [ -z "$(VERSION)" ]; then \
 		echo "Usage: make release-bump VERSION=X.Y.Z"; exit 1; \
 	fi
 	uvx bump-my-version bump --new-version "$(VERSION)" patch
+	uvx uv@0.12.0 lock
 	@echo ""
 	@echo "Bumped to $(VERSION). Review with 'git diff', then commit on release/$(VERSION) and open a PR."

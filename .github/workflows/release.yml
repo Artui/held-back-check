@@ -62,12 +62,15 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           # The block between `## [<version>]` and the next `## [` heading,
-          # with surrounding blank lines trimmed.
+          # with surrounding blank lines trimmed. The oldest section runs to
+          # the end of the file, so the compare-link definitions there are
+          # dropped rather than carried into its notes.
           awk -v ver="$VERSION" '
             /^## \[/ {
               if (capture) { exit }
               if (index($0, "[" ver "]") == 4) { capture = 1; next }
             }
+            /^\[[^]]*\]: / { next }
             capture { print }
           ' CHANGELOG.md \
             | awk 'NF { found = 1 } found { lines[++n] = $0 }
@@ -78,6 +81,17 @@ jobs:
             echo "::error::CHANGELOG.md has no [$VERSION] section"
             exit 1
           fi
+          # The line a consumer copies. The job summary has it too, but a
+          # summary expires with the run, and the notes are where the README
+          # sends people for it.
+          {
+            echo
+            echo "Pin this release as:"
+            echo
+            echo '```yaml'
+            echo "uses: Artui/held-back-check@$GITHUB_SHA # v$VERSION"
+            echo '```'
+          } >> "$RUNNER_TEMP/notes.md"
 
       - name: Tag and create the GitHub Release
         if: steps.version.outputs.released == 'true'
