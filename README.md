@@ -56,7 +56,7 @@ the suite:
 
 Pin the release's commit SHA, with the version as a trailing comment.
 Dependabot's `github-actions` updater reads that comment and proposes new
-releases. The release notes give the SHA for each version.
+releases. Each release's notes end with the line to pin.
 
 To quote the report in an issue that a failed scheduled run opens, read
 `steps.held-back.outputs.report`. It is set even when the step fails. The file
@@ -69,7 +69,7 @@ says why.
 | --- | --- | --- |
 | `working-directory` | `.` | Directory holding `pyproject.toml` and the synced environment. |
 | `min-age-days` | `7` | A newer release younger than this is a notice, never a failure. |
-| `report` | `$RUNNER_TEMP/held-back.md` | Where to write the markdown report, relative to the workspace. |
+| `report` | `$RUNNER_TEMP/held-back.md` | Where to write the markdown report, relative to the workspace. Set it on each use when a job runs the action more than once, or the second run removes the first one's report. |
 
 ### Outputs
 
@@ -86,13 +86,22 @@ The same report is appended to the job summary.
   3.10). The action runs inside that environment, because what it measures is
   that environment. pytest brings both packages. A project without pytest must
   declare them in a dependency group.
-- Network access to `pypi.org`.
+- Network access to `pypi.org`. Every direct dependency is looked up there, so
+  one served only from another index stops the check with exit 2.
+- A Linux or macOS runner. The action's shell steps have not been run on
+  Windows.
+- One project. In a uv workspace, run it once per member, with that member as
+  `working-directory`; a constraint declared only at the workspace root is not
+  read.
 
 ## What counts as held back
 
 The check covers each requirement in `[project] dependencies`, in every extra
-and in every dependency group, because a drift job installs all of them. It
-compares the installed version with the newest release that meets all of these:
+and in every dependency group, uv's `[tool.uv] dev-dependencies` included,
+because a drift job installs all of them. A requirement whose marker names an
+extra (`; extra == 'postgres'`) is covered like the extra's own table, and one
+whose marker excludes the running Python is not. It compares the installed
+version with the newest release that meets all of these:
 
 - **It is final.** Pre-releases, dev releases and yanked files do not count,
   even where the declared specifier names a pre-release.
@@ -131,7 +140,7 @@ repository is also the one that can fix it.
 | --- | --- |
 | 0 | Nothing is held back. |
 | 1 | Something is held back past the window. |
-| 2 | The check could not look. Causes include an unreadable index, an unparseable requirement, a missing import, or an environment with none of the declared dependencies installed. |
+| 2 | The check could not look. Causes include an index that cannot be reached or whose answer cannot be read, an unparseable requirement, a missing import, or an environment with none of the declared dependencies installed. |
 
 The action fails rather than warns. A scheduled run's warnings go unread, so a
 failure is the only signal that anyone sees.

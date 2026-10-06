@@ -19,6 +19,7 @@ or the reason string, and ``upload-time`` carries microseconds and a ``Z``.
 from __future__ import annotations
 
 import datetime
+import http.client
 import io
 import json
 import runpy
@@ -189,6 +190,16 @@ def test_a_file_with_no_python_requirement_admits_every_python(
     assert release.version == Version("2.55.0")
 
 
+def test_a_pre_release_interpreter_meets_the_floors_it_is_past(script: ModuleType) -> None:
+    # A drift job on an alpha of the next Python still has releases to compare.
+    # Up to packaging 25, a plain ``>=3.10`` does not contain ``3.15.0a1``, so
+    # every file that declares a floor would drop out and nothing could be held.
+    # From 26 it does anyway, which is why CI also runs this on packaging 22.
+    (release,) = script.releases_from_index([_wheel("2.55.0", 10)], Version("3.15.0a1"))
+
+    assert release.version == Version("2.55.0")
+
+
 def test_a_file_whose_python_requirement_does_not_parse_is_skipped(script: ModuleType) -> None:
     # Only ancient files carry one, and the resolver refuses them too.
     files = [_wheel("2.55.0", 10, requires_python=">=2.7.*")]
@@ -256,8 +267,15 @@ def test_declared_bounds_intersect_every_occurrence_the_job_installs(script: Mod
             "name": "Django-AG-UI",
             "dependencies": [
                 "pydantic-ai-slim[ag-ui]>=2.37,<3",
-                # A marker no interpreter running this suite satisfies.
+                # A marker every interpreter running this suite satisfies, and
+                # one none does.
+                "httpx>=0.28; python_version >= '3'",
                 "tomli>=2; python_version < '3'",
+                # A marker naming a declared extra, which ``--all-extras``
+                # installs just as it installs the table; and one naming an
+                # extra the project does not declare, which nothing installs.
+                "django>=5; extra == 'anthropic'",
+                "six; extra == 'undeclared'",
             ],
             "optional-dependencies": {"anthropic": ["pydantic-ai-slim[anthropic]>=2.33,<3"]},
         },
@@ -270,8 +288,16 @@ def test_declared_bounds_intersect_every_occurrence_the_job_installs(script: Mod
         },
         "tool": {
             "uv": {
-                "constraint-dependencies": ["ruff<1", "not-direct<2"],
-                "override-dependencies": ["also-not-direct>=1"],
+                # uv's older spelling of the dev group, which it installs as one.
+                "dev-dependencies": ["pytest>=8"],
+                # A line whose marker excludes this interpreter binds nothing,
+                # in either table.
+                "constraint-dependencies": [
+                    "ruff<1",
+                    "not-direct<2",
+                    "ruff<0.5; python_version < '3'",
+                ],
+                "override-dependencies": ["also-not-direct>=1", "pytest>=7; python_version < '3'"],
             }
         },
     }
@@ -280,6 +306,9 @@ def test_declared_bounds_intersect_every_occurrence_the_job_installs(script: Mod
 
     assert bounds == {
         "pydantic-ai-slim": SpecifierSet(">=2.37,<3") & SpecifierSet(">=2.33,<3"),
+        "httpx": SpecifierSet(">=0.28"),
+        "django": SpecifierSet(">=5"),
+        "pytest": SpecifierSet(">=8"),
         # Under its normalised name, with the uv constraint folded in as the
         # project's own ceiling. Neither uv table adds a name.
         "ruff": SpecifierSet(">=0.9,<1"),
@@ -295,6 +324,26 @@ def test_an_override_replaces_what_the_project_declares(script: ModuleType) -> N
     }
 
     assert script.declared_bounds(pyproject) == {"pydantic-ai-slim": SpecifierSet(">=2.37")}
+
+
+def test_a_constraint_still_binds_an_overridden_name(script: ModuleType) -> None:
+    # uv replaces the requirement with every override line for the name, then
+    # applies constraints to what replaced it, so all three intersect. Applied
+    # the other way round, the override would discard the constraint, and the
+    # release it excludes would be reported as held.
+    pyproject = {
+        "project": {"name": "demo", "dependencies": ["pydantic-ai-slim>=2.37,<3"]},
+        "tool": {
+            "uv": {
+                "override-dependencies": ["pydantic-ai-slim>=2.37", "pydantic-ai-slim!=2.50.0"],
+                "constraint-dependencies": ["pydantic-ai-slim<2.60"],
+            }
+        },
+    }
+
+    assert script.declared_bounds(pyproject) == {
+        "pydantic-ai-slim": SpecifierSet(">=2.37,!=2.50.0,<2.60")
+    }
 
 
 def test_a_requirement_that_does_not_parse_stops_the_check(script: ModuleType) -> None:
@@ -379,14 +428,63 @@ def test_an_index_that_stays_unreadable_stops_the_check(
 ) -> None:
     # Retried and then fatal: a check that passes when it could not look is the
     # failure it exists to prevent.
+    attempts: list[int] = []
+    slept: list[float] = []
+
     def urlopen(request: Any, timeout: float) -> _Response:
+        attempts.append(1)
         raise urllib.error.URLError("name resolution failed")
+
+    monkeypatch.setattr(script.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(script.time, "sleep", slept.append)
+
+    with pytest.raises(script.CannotCheck, match="cannot read https://pypi.org/simple/slim/"):
+        script.fetch_files("slim")
+    assert len(attempts) == 3
+    assert slept == [1, 2]
+
+
+class _Truncated(_Response):
+    def read(self, *args: Any) -> bytes:
+        raise http.client.IncompleteRead(b'{"files": [')
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # Raised while waiting for the status line, which urllib does not wrap.
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        ConnectionResetError(54, "Connection reset by peer"),
+        # Raised while reading the body, after urlopen has returned.
+        _Truncated(),
+        # A 200 that is not the page: a proxy's error page, and JSON of
+        # another shape.
+        _Response(b"<html>Service Unavailable</html>"),
+        _Response(b'{"meta": {"api-version": "1.4"}}'),
+        _Response(b"[]"),
+    ],
+    ids=["disconnected", "reset", "truncated", "html", "no-files", "not-an-object"],
+)
+def test_a_response_that_cannot_be_read_is_a_failure_to_look(
+    script: ModuleType, monkeypatch: pytest.MonkeyPatch, answer: Any
+) -> None:
+    # Each is retried like any other failure, and then stops the check with
+    # exit 2, never a traceback that exits 1 and reads as a hold.
+    attempts: list[int] = []
+
+    def urlopen(request: Any, timeout: float) -> _Response:
+        attempts.append(1)
+        if isinstance(answer, BaseException):
+            raise answer
+        answer.seek(0)
+        return answer
 
     monkeypatch.setattr(script.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
 
     with pytest.raises(script.CannotCheck, match="cannot read https://pypi.org/simple/slim/"):
         script.fetch_files("slim")
+    assert len(attempts) == 3
 
 
 # -- asking the resolver why --------------------------------------------------
@@ -493,7 +591,12 @@ def test_main_fails_on_a_hold_and_explains_it(
     _index(
         script,
         monkeypatch,
-        pydantic_ai_slim=("2.46.0", [_wheel("2.46.0", 30), _wheel("2.51.0", 10)]),
+        # 2.54.0 is inside the window: the newest allowed, but not the release
+        # the hold is about, so not the one the resolver is asked to reach.
+        pydantic_ai_slim=(
+            "2.46.0",
+            [_wheel("2.46.0", 30), _wheel("2.51.0", 10), _wheel("2.54.0", 1)],
+        ),
         httpx=("0.28.0", [_wheel("0.28.0", 30, name="httpx"), _wheel("0.29.0", 2, name="httpx")]),
     )
     asked: list[tuple[Path, str, Version]] = []
@@ -506,14 +609,16 @@ def test_main_fails_on_a_hold_and_explains_it(
     summary = tmp_path / "summary.md"
     summary.write_text("earlier step\n")
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    report = tmp_path / "held-back.md"
+    # In a directory that does not exist yet, which is created rather than
+    # failing the step after the report was printed.
+    report = tmp_path / "reports" / "held-back.md"
 
     status = script.main(["--project", str(tmp_path), "--report", str(report)])
 
     assert status == 1
     assert asked == [(tmp_path, "pydantic-ai-slim", Version("2.51.0"))]
     text = report.read_text()
-    assert "| `pydantic-ai-slim` | 2.46.0 | 2.51.0, 2026-09-26 (10 days ago) | 2.51.0 |" in text
+    assert "| `pydantic-ai-slim` | 2.46.0 | 2.51.0, 2026-09-26 (10 days ago) | 2.54.0 |" in text
     assert "depends on ag-ui-protocol<1" in text
     # Inside the window: listed, and not what failed the run.
     assert "- `httpx` 0.28.0: 0.29.0 published 2026-10-04 (2 days ago)" in text
