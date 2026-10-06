@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-10-06
+
 ### Added
 
 - **A composite action that fails a drift job when an unpinned resolve holds a
@@ -31,4 +33,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     nothing declared is installed) exits 2 and never passes. Reading the index
     is retried twice first.
 
-[Unreleased]: https://github.com/Artui/held-back-check/compare/v0.0.0...HEAD
+[Unreleased]: https://github.com/Artui/held-back-check/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Artui/held-back-check/compare/v0.0.0...v0.1.0

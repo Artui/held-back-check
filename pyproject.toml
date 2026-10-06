@@ -3,7 +3,7 @@ name = "held-back-check"
 # Released as a git tag, not a distribution: ``release.yml`` tags ``vX.Y.Z`` and
 # creates the GitHub Release when this moves past the newest tag. Consumers pin
 # the tag's commit SHA.
-version = "0.0.0"
+version = "0.1.0"
 description = "A GitHub Action that fails when an unpinned uv resolve holds a direct dependency below its newest release, and says what holds it."
 readme = "README.md"
 license = "MIT"
@@ -69,7 +69,7 @@ python-version = "3.10"
 # bump-my-version drives `make release-bump`: it rewrites the version above and
 # promotes the CHANGELOG [Unreleased] block under a new dated heading.
 [tool.bumpversion]
-current_version = "0.0.0"
+current_version = "0.1.0"
 allow_dirty = false
 commit = false
 tag = false
