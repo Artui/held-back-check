@@ -101,7 +101,7 @@ try:
     # arms on any Python. ty assumes the 3.10 floor, where the first does not
     # resolve, which is the case the second one is for.
     try:
-        import tomllib  # ty: ignore[unresolved-import]
+        import tomllib  # ty: ignore[import-not-found]
     except ModuleNotFoundError:  # Python 3.10
         import tomli as tomllib
 except ModuleNotFoundError as missing:
